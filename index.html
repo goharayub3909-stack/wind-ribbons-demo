@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Wind ribbons in 3D</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap">
+<style>
+  :root { box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);
+    --panel-bg: rgba(255,255,255,.93); --panel-fg: #10202f; --panel-muted: #46576a; --panel-line: rgba(16,32,47,.2); --accent: #0b7a5a; --accent-fg: #ffffff; --field: rgba(16,32,47,.08); }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --panel-bg: rgba(2,6,23,.88); --panel-fg: #f8fafc; --panel-muted: #cbd5e1; --panel-line: rgba(148,163,184,.4); --accent: #6ee7b7; --accent-fg: #052e22; --field: rgba(248,250,252,.1); } }
+  :root[data-theme="dark"] { --panel-bg: rgba(2,6,23,.88); --panel-fg: #f8fafc; --panel-muted: #cbd5e1; --panel-line: rgba(148,163,184,.4); --accent: #6ee7b7; --accent-fg: #052e22; --field: rgba(248,250,252,.1); }
+  html { height: 100%; scroll-padding-top: env(safe-area-inset-top, 0px); }
+  body { height: 100%; margin: 0; overflow: hidden; background: linear-gradient(#0b1220, #121c33); color: var(--panel-fg); font: 14px/1.45 'DM Sans', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  #stage canvas:active { cursor: grabbing; }
+  #panel { position: fixed; left: 12px; bottom: calc(12px + env(safe-area-inset-bottom, 0px)); width: min(330px, calc(100vw - 24px)); max-height: calc(100% - 24px - env(safe-area-inset-top, 0px)); overflow: auto;
+    background: var(--panel-bg); border: 1px solid var(--panel-line); border-radius: 14px; padding: 12px 14px 14px; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+  #panel h1 { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .note { margin: 8px 0 10px; color: var(--panel-muted); font-size: 12.5px; }
+  .row { display: flex; gap: 8px; margin: 8px 0; }
+  button { font: inherit; color: var(--panel-fg); background: var(--field); border: 1px solid var(--panel-line); border-radius: 10px; min-height: 44px; padding: 0 12px; cursor: pointer; flex: 1; }
+  button[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 700; }
+  button.small { flex: 0 0 44px; padding: 0; }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .ctl { display: grid; grid-template-columns: 1fr auto; gap: 0 8px; margin: 6px 0 0; }
+  .ctl label { font-size: 13px; }
+  .ctl output { font-variant-numeric: tabular-nums; color: var(--panel-muted); font-size: 13px; }
+  .ctl input[type=range] { grid-column: 1 / -1; width: 100%; height: 30px; accent-color: var(--accent); margin: 0; }
+  .chk { display: flex; align-items: center; gap: 10px; min-height: 40px; font-size: 13.5px; }
+  .chk input { width: 20px; height: 20px; accent-color: var(--accent); }
+  #stats { margin: 8px 0 0; color: var(--panel-muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  #fail { position: fixed; inset: 0; display: none; place-items: center; padding: 24px; text-align: center; color: #f8fafc; }
+  @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="fail"><p>This page needs WebGL, and this browser could not start it.</p></div>
+
+<aside id="panel" aria-label="Wind ribbon controls">
+  <div class="head"><h1>Wind ribbons in 3D</h1><button id="collapse" class="small" aria-expanded="true" aria-controls="body" aria-label="Collapse controls">–</button></div>
+  <div id="body">
+    <p class="note">Synthetic wind over made-up terrain, to judge the look only. Drag to rotate, scroll or pinch to zoom, right-drag or Shift-drag to pan.</p>
+    <div class="row">
+      <button id="pWindy" aria-pressed="true">Windy-like trails</button>
+      <button id="pOld" aria-pressed="false">Current portal look</button>
+    </div>
+    <div class="row"><button id="pause" aria-pressed="false">Pause</button><button id="reset">Reset view</button></div>
+    <div id="sliders"></div>
+    <label class="chk"><input type="checkbox" id="outline" checked> Dark outline under the trails</label>
+    <label class="chk"><input type="checkbox" id="speedcol"> Colour trails by speed</label>
+    <label class="chk"><input type="checkbox" id="depth" checked> Hide trails behind ridges</label>
+    <p id="stats" aria-live="polite">Starting…</p>
+  </div>
+</aside>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+'use strict';
+var THREE = window.THREE;
+var statsEl = document.getElementById('stats');
+if (!THREE) { statsEl.textContent = 'three.js could not be loaded.'; return; }
+
+/* ------------------------------------------------------------------ world and parameters */
+var D = 100, HALF = D / 2;                 // the square domain, in world units
+var G = 161, STEP = D / (G - 1);           // terrain grid
+var WG = 128, WSTEP = D / (WG - 1);        // wind grid
+var recDt = 0.05;                          // seconds between recorded trail points
+var P = { N: 3000, L: 20, speed: 1.0, effect: 0.7, wHead: 3.2, wTail: 0.5, hover: 0.35, bright: 0.8, alphaPow: 1.8, opacity: 0.95, outline: true, speedCol: false, depth: true, paused: false };
+
+/* ------------------------------------------------------------------ noise and terrain */
+function rng(a) { return function () { a |= 0; a = (a + 0x6d2b79f5) | 0; var t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+var perm = new Uint8Array(512);
+(function () { var r = rng(7), p = [], i; for (i = 0; i < 256; i++) p[i] = i; for (i = 255; i > 0; i--) { var j = Math.floor(r() * (i + 1)), t = p[i]; p[i] = p[j]; p[j] = t; } for (i = 0; i < 512; i++) perm[i] = p[i & 255]; })();
+function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function grad(h, x, y) { switch (h & 7) { case 0: return x + y; case 1: return x - y; case 2: return -x + y; case 3: return -x - y; case 4: return x; case 5: return -x; case 6: return y; default: return -y; } }
+function noise(x, y) { var X = Math.floor(x) & 255, Y = Math.floor(y) & 255; x -= Math.floor(x); y -= Math.floor(y); var u = fade(x), v = fade(y), a = perm[X] + Y, b = perm[X + 1] + Y;
+  return lerp(lerp(grad(perm[a], x, y), grad(perm[b], x - 1, y), u), lerp(grad(perm[a + 1], x, y - 1), grad(perm[b + 1], x - 1, y - 1), u), v); }
+function fbm(x, y, o) { var s = 0, a = 0.5, f = 1; for (var i = 0; i < o; i++) { s += a * noise(x * f, y * f); f *= 2; a *= 0.5; } return s; }
+function ridged(x, y, o) { var s = 0, a = 0.5, f = 1; for (var i = 0; i < o; i++) { var n = 1 - Math.abs(noise(x * f, y * f)); s += a * n * n; f *= 2; a *= 0.5; } return s; }
+function smooth(a, b, x) { var t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); }
+function terrainH(x, z) {                  // mountains to the north and west, a plain to the south-east, one river valley
+  var nx = x / HALF, nz = z / HALF;
+  var m = smooth(-0.35, 0.55, -nz * 0.8 + nx * 0.45 + 0.35 * fbm(x * 0.03, z * 0.03, 3));
+  m = Math.max(m, (1 - smooth(-0.85, -0.35, nx)) * 0.85);
+  var mount = ridged(x * 0.032 + 3, z * 0.032 - 7, 4) + 0.12 * fbm(x * 0.1, z * 0.1, 3);
+  var h = 0.4 * fbm(x * 0.05, z * 0.05, 3) + 0.3 + m * mount * 15;
+  var cx = -8 + Math.sin(z * 0.08) * 8 + (z + 50) * 0.18, d = x - cx;
+  h -= m * 6 * Math.exp(-d * d / 72);
+  return Math.max(0, h);
+}
+var H = new Float32Array(G * G);
+for (var gj = 0; gj < G; gj++) for (var gi = 0; gi < G; gi++) H[gj * G + gi] = terrainH(-HALF + gi * STEP, -HALF + gj * STEP);
+function heightAt(x, z) {
+  var fx = (x + HALF) / STEP, fz = (z + HALF) / STEP;
+  fx = Math.min(Math.max(fx, 0), G - 1.001); fz = Math.min(Math.max(fz, 0), G - 1.001);
+  var i = fx | 0, j = fz | 0, tx = fx - i, tz = fz - j, k = j * G + i;
+  return (H[k] * (1 - tx) + H[k + 1] * tx) * (1 - tz) + (H[k + G] * (1 - tx) + H[k + G + 1] * tx) * tz;
+}
+
+/* ------------------------------------------------------------------ renderer, scene, terrain mesh */
+var stage = document.getElementById('stage');
+var renderer;
+try { renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }); } catch (e) { document.getElementById('fail').style.display = 'grid'; statsEl.textContent = 'WebGL is not available.'; return; }
+var dpr = Math.min(window.devicePixelRatio || 1, 2);
+renderer.setPixelRatio(dpr);
+stage.appendChild(renderer.domElement);
+var scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x0e1628, 120, 270);
+var camera = new THREE.PerspectiveCamera(45, 1, 1, 600);
+scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x3a2c1c, 0.6));
+var sun = new THREE.DirectionalLight(0xffffff, 0.85); sun.position.set(-60, 90, -50); scene.add(sun);
+
+var stops = [[0, [110, 143, 61]], [0.1, [130, 140, 75]], [0.28, [160, 120, 70]], [0.5, [185, 155, 120]], [0.75, [205, 190, 165]], [1, [238, 233, 220]]];
+function ramp(t) { t = Math.min(1, Math.max(0, t)); for (var i = 1; i < stops.length; i++) if (t <= stops[i][0]) { var a = stops[i - 1], b = stops[i], k = (t - a[0]) / (b[0] - a[0]); return [lerp(a[1][0], b[1][0], k), lerp(a[1][1], b[1][1], k), lerp(a[1][2], b[1][2], k)]; } return stops[stops.length - 1][1]; }
+(function buildTerrain() {
+  var pos = new Float32Array(G * G * 3), col = new Float32Array(G * G * 3), idx = new Uint32Array((G - 1) * (G - 1) * 6), o = 0, i, j;
+  for (j = 0; j < G; j++) for (i = 0; i < G; i++) {
+    var k = j * G + i, h = H[k], hx = (H[j * G + Math.min(i + 1, G - 1)] - H[j * G + Math.max(i - 1, 0)]) / (2 * STEP), hz = (H[Math.min(j + 1, G - 1) * G + i] - H[Math.max(j - 1, 0) * G + i]) / (2 * STEP);
+    var slope = Math.min(1, Math.hypot(hx, hz) * 0.9), c = ramp(h / 14), dark = 1 - 0.38 * slope;
+    pos[k * 3] = -HALF + i * STEP; pos[k * 3 + 1] = h; pos[k * 3 + 2] = -HALF + j * STEP;
+    col[k * 3] = c[0] / 255 * dark; col[k * 3 + 1] = c[1] / 255 * dark; col[k * 3 + 2] = c[2] / 255 * dark;
+  }
+  for (j = 0; j < G - 1; j++) for (i = 0; i < G - 1; i++) { var a = j * G + i, b = a + 1, c2 = a + G, d = c2 + 1; idx[o++] = a; idx[o++] = c2; idx[o++] = b; idx[o++] = b; idx[o++] = c2; idx[o++] = d; }
+  var g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('color', new THREE.BufferAttribute(col, 3)); g.setIndex(new THREE.BufferAttribute(idx, 1)); g.computeVertexNormals();
+  window.__terrainMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+  scene.add(new THREE.Mesh(g, window.__terrainMat));
+})();
+function applyBrightness() { window.__terrainMat.color.setScalar(P.bright); }
+applyBrightness();
+
+/* ------------------------------------------------------------------ synthetic wind: background flow, one swirl, terrain deflection */
+var gA = new Float32Array(WG * WG * 2), gB = new Float32Array(WG * WG * 2);
+function buildWindGrid(theta, speed, out) {
+  var e = P.effect;
+  for (var j = 0; j < WG; j++) for (var i = 0; i < WG; i++) {
+    var x = -HALF + i * WSTEP, z = -HALF + j * WSTEP, ux = speed * Math.cos(theta), uz = speed * Math.sin(theta);
+    var dx = x + 18, dz = z - 20, r2 = dx * dx + dz * dz + 324;      // gentle swirl on the plain
+    ux += -108 * dz / r2; uz += 108 * dx / r2;
+    var hx = (heightAt(x + 1, z) - heightAt(x - 1, z)) / 2, hz = (heightAt(x, z + 1) - heightAt(x, z - 1)) / 2, gm = Math.hypot(hx, hz);
+    if (e > 0 && gm > 1e-4) {
+      var nx = hx / gm, nz = hz / gm, steep = Math.min(1, gm * 1.5), up = ux * nx + uz * nz;
+      if (up > 0) {                                                  // wind pushing into a slope: part of it is blocked and turned along the contour
+        var blocked = e * 0.8 * steep * up; ux -= blocked * nx; uz -= blocked * nz;
+        var tx = -nz, tz = nx, sgn = (ux * tx + uz * tz) >= 0 ? 1 : -1; ux += sgn * blocked * 0.6 * tx; uz += sgn * blocked * 0.6 * tz;
+      }
+      var f = 1 + e * 0.035 * heightAt(x, z); ux *= f; uz *= f;      // faster over high ground
+    }
+    var q = (j * WG + i) * 2; out[q] = ux; out[q + 1] = uz;
+  }
+}
+function rebuildWind() { buildWindGrid(0.70, 7, gA); buildWindGrid(0.15, 7, gB); }
+var wu = 0, wv = 0;
+function sampleWind(x, z, wb) {
+  var fx = (x + HALF) / WSTEP, fz = (z + HALF) / WSTEP;
+  fx = Math.min(Math.max(fx, 0), WG - 1.001); fz = Math.min(Math.max(fz, 0), WG - 1.001);
+  var i = fx | 0, j = fz | 0, tx = fx - i, tz = fz - j, w00 = (1 - tx) * (1 - tz), w10 = tx * (1 - tz), w01 = (1 - tx) * tz, w11 = tx * tz;
+  var a = (j * WG + i) * 2, b = a + 2, c = a + WG * 2, d = c + 2;
+  var uA = gA[a] * w00 + gA[b] * w10 + gA[c] * w01 + gA[d] * w11, vA = gA[a + 1] * w00 + gA[b + 1] * w10 + gA[c + 1] * w01 + gA[d + 1] * w11;
+  var uB = gB[a] * w00 + gB[b] * w10 + gB[c] * w01 + gB[d] * w11, vB = gB[a + 1] * w00 + gB[b + 1] * w10 + gB[c + 1] * w01 + gB[d + 1] * w11;
+  wu = uA + (uB - uA) * wb; wv = vA + (vB - vA) * wb;                // smooth in space and time
+}
+
+/* ------------------------------------------------------------------ ribbon shaders */
+var VERT = [
+'precision highp float;',
+'uniform mat4 projectionMatrix; uniform mat4 modelViewMatrix;',
+'uniform vec2 uRes; uniform float uWHead; uniform float uWTail; uniform float uExtra; uniform float uAlphaPow;',
+'attribute vec4 position; attribute vec4 prevPos; attribute vec4 nextPos; attribute float side; attribute float tc;',
+'varying float vA; varying float vSide; varying float vSpd; varying float vDepth; varying float vCov;',
+'void main(){',
+'  vec4 cur = projectionMatrix * modelViewMatrix * vec4(position.xyz, 1.0);',
+'  if (cur.w < 0.05) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); vA = 0.0; vSide = 0.0; vSpd = 0.0; vDepth = 0.0; vCov = 0.0; return; }',
+'  vec3 pp = tc < 0.0001 ? position.xyz : prevPos.xyz;',
+'  vec3 np = tc > 0.9999 ? position.xyz : nextPos.xyz;',
+'  vec4 pv = projectionMatrix * modelViewMatrix * vec4(pp, 1.0);',
+'  vec4 nv = projectionMatrix * modelViewMatrix * vec4(np, 1.0);',
+'  vec2 sc = cur.xy / cur.w * uRes * 0.5; vec2 sp = pv.xy / pv.w * uRes * 0.5; vec2 sn = nv.xy / nv.w * uRes * 0.5;',
+'  vec2 d = sn - sp; float len = length(d); d = len > 1e-5 ? d / len : vec2(1.0, 0.0);',
+'  vec2 nrm = vec2(-d.y, d.x);',
+'  float w = mix(uWTail, uWHead, tc) + uExtra;',
+'  float wpx = max(w, 1.2);',
+'  gl_Position = cur;',
+'  gl_Position.xy += nrm * side * wpx * 0.5 * 2.0 / uRes * cur.w;',
+'  float life = floor(position.w) / 255.0;',
+'  vA = pow(tc, uAlphaPow) * life;',
+'  vSpd = fract(position.w);',
+'  vSide = side; vCov = min(1.0, w / wpx); vDepth = cur.w;',
+'}'
+].join('\n');
+var FRAG = [
+'precision highp float;',
+'uniform vec3 uColor; uniform float uOpacity; uniform float uMode; uniform float uFogNear; uniform float uFogFar;',
+'varying float vA; varying float vSide; varying float vSpd; varying float vDepth; varying float vCov;',
+'vec3 speedRamp(float s){ vec3 a = vec3(0.50, 0.78, 1.0); vec3 b = vec3(1.0); vec3 c = vec3(1.0, 0.48, 0.85); return s < 0.5 ? mix(a, b, s * 2.0) : mix(b, c, (s - 0.5) * 2.0); }',
+'void main(){',
+'  float edge = 1.0 - smoothstep(0.55, 1.0, abs(vSide));',
+'  float a = vA * uOpacity * edge * vCov;',
+'  a *= 1.0 - smoothstep(uFogNear, uFogFar, vDepth);',
+'  vec3 col = uMode > 0.5 ? speedRamp(clamp(vSpd * 1.4, 0.0, 1.0)) : uColor;',
+'  gl_FragColor = vec4(col, a);',
+'}'
+].join('\n');
+function makeMat(color, opacity, extra) {
+  return new THREE.RawShaderMaterial({ vertexShader: VERT, fragmentShader: FRAG, transparent: true, depthWrite: false, depthTest: true, side: THREE.DoubleSide,
+    uniforms: { uRes: { value: new THREE.Vector2(1, 1) }, uWHead: { value: 2.4 }, uWTail: { value: 0.6 }, uExtra: { value: extra }, uAlphaPow: { value: 1.3 },
+      uColor: { value: new THREE.Color(color) }, uOpacity: { value: opacity }, uMode: { value: 0 }, uFogNear: { value: 150 }, uFogFar: { value: 300 } } });
+}
+var coreMat = makeMat(0xf2f8ff, 0.95, 0), outMat = makeMat(0x0b1d33, 0.38, 2.2);
+var core = new THREE.Mesh(new THREE.BufferGeometry(), coreMat), outline = new THREE.Mesh(new THREE.BufferGeometry(), outMat);
+core.frustumCulled = false; outline.frustumCulled = false; outline.renderOrder = 1; core.renderOrder = 2;
+scene.add(outline); scene.add(core);
+function applyLook() {
+  var m, k;
+  for (k = 0; k < 2; k++) { m = k ? outMat : coreMat; m.uniforms.uWHead.value = P.wHead * dpr; m.uniforms.uWTail.value = P.wTail * dpr; m.uniforms.uAlphaPow.value = P.alphaPow; m.depthTest = P.depth; }
+  coreMat.uniforms.uOpacity.value = P.opacity; coreMat.uniforms.uMode.value = P.speedCol ? 1 : 0; outMat.uniforms.uExtra.value = 2.2 * dpr; outline.visible = P.outline;
+}
+
+/* ------------------------------------------------------------------ particles */
+var N, L, px, pz, age, lifeMax, sp, ring, rh = 0, recAcc = 0, T = 0, spawnIdx = 1, data, totalVerts;
+function halton(i, b) { var f = 1, r = 0; while (i > 0) { f /= b; r += f * (i % b); i = Math.floor(i / b); } return r; }
+function spawn(i) {
+  var x = (halton(spawnIdx, 2) - 0.5) * (D - 1), z = (halton(spawnIdx, 3) - 0.5) * (D - 1); spawnIdx++;
+  px[i] = x; pz[i] = z; age[i] = 0; lifeMax[i] = 3 + Math.random() * 5;
+  var y = heightAt(x, z) + P.hover;
+  for (var k = 0; k < L; k++) { var o = (i * L + k) * 3; ring[o] = x; ring[o + 1] = y; ring[o + 2] = z; }
+}
+function buildParticles() {
+  N = P.N; L = P.L;
+  px = new Float32Array(N); pz = new Float32Array(N); age = new Float32Array(N); lifeMax = new Float32Array(N); sp = new Float32Array(N); ring = new Float32Array(N * L * 3);
+  rh = 0; recAcc = 0;
+  var pts = L + 1; totalVerts = N * pts * 2;
+  data = new Float32Array((totalVerts + 4) * 4);
+  var side = new Float32Array(totalVerts), tc = new Float32Array(totalVerts), idx = new Uint32Array(N * L * 6), i, k, o = 0, v = 0;
+  for (i = 0; i < N; i++) {
+    for (k = 0; k < pts; k++) { var t = k / L; side[v] = -1; tc[v] = t; v++; side[v] = 1; tc[v] = t; v++; }
+    for (k = 0; k < L; k++) { var a0 = (i * pts + k) * 2; idx[o++] = a0; idx[o++] = a0 + 1; idx[o++] = a0 + 2; idx[o++] = a0 + 1; idx[o++] = a0 + 3; idx[o++] = a0 + 2; }
+  }
+  var geo = new THREE.BufferGeometry(), n4 = totalVerts * 4;
+  function dyn(view) { var a = new THREE.BufferAttribute(view, 4); a.setUsage(THREE.DynamicDrawUsage); return a; }
+  geo.setAttribute('prevPos', dyn(data.subarray(0, n4)));            // the same memory, shifted by one point:
+  geo.setAttribute('position', dyn(data.subarray(8, 8 + n4)));       // every vertex can see its neighbours
+  geo.setAttribute('nextPos', dyn(data.subarray(16, 16 + n4)));
+  geo.setAttribute('side', new THREE.BufferAttribute(side, 1)); geo.setAttribute('tc', new THREE.BufferAttribute(tc, 1));
+  geo.setIndex(new THREE.BufferAttribute(idx, 1));
+  core.geometry.dispose(); core.geometry = geo; outline.geometry = geo;
+  for (i = 0; i < N; i++) { spawn(i); age[i] = Math.random() * lifeMax[i]; }
+  for (i = 0; i < 90; i++) advance(1 / 30);                         // pre-roll so trails exist at the first frame
+}
+function advance(dt) {
+  T += dt; var wb = 0.5 + 0.5 * Math.sin(T * 0.12), sc = P.speed, i;
+  for (i = 0; i < N; i++) {
+    var x = px[i], z = pz[i]; sampleWind(x, z, wb);
+    x += wu * sc * dt; z += wv * sc * dt; px[i] = x; pz[i] = z; age[i] += dt; sp[i] = Math.min(Math.hypot(wu, wv) / 14, 0.999);
+    if (age[i] > lifeMax[i] || x < -HALF + 0.3 || x > HALF - 0.3 || z < -HALF + 0.3 || z > HALF - 0.3) spawn(i);
+  }
+  recAcc += dt;
+  while (recAcc >= recDt) {
+    recAcc -= recDt; rh = (rh + 1) % L;
+    for (i = 0; i < N; i++) { var q = (i * L + rh) * 3; ring[q] = px[i]; ring[q + 1] = heightAt(px[i], pz[i]) + P.hover; ring[q + 2] = pz[i]; }
+  }
+}
+function fill() {
+  var o = 8, i, k;
+  for (i = 0; i < N; i++) {
+    var a = age[i], lm = lifeMax[i], env = Math.max(0, Math.min(1, a / 0.5)) * Math.max(0, Math.min(1, (lm - a) / 0.8)), w = Math.floor(env * 255) + sp[i], base = i * L * 3, s = rh + 1;
+    for (k = 0; k < L; k++) {
+      if (s >= L) s -= L; var q = base + s * 3; s++;
+      var x = ring[q], y = ring[q + 1], z = ring[q + 2];
+      data[o] = x; data[o + 1] = y; data[o + 2] = z; data[o + 3] = w; data[o + 4] = x; data[o + 5] = y; data[o + 6] = z; data[o + 7] = w; o += 8;
+    }
+    var hx = px[i], hz = pz[i], hy = heightAt(hx, hz) + P.hover;
+    data[o] = hx; data[o + 1] = hy; data[o + 2] = hz; data[o + 3] = w; data[o + 4] = hx; data[o + 5] = hy; data[o + 6] = hz; data[o + 7] = w; o += 8;
+  }
+  var at = core.geometry.attributes; at.position.needsUpdate = true; at.prevPos.needsUpdate = true; at.nextPos.needsUpdate = true;
+}
+
+/* ------------------------------------------------------------------ camera and input */
+var cam = { az: 0.0, pol: 1.0, r: 118, tx: 0, ty: 2, tz: 6 }, cam0 = JSON.parse(JSON.stringify(cam));
+function updateCam() {
+  var sp_ = Math.sin(cam.pol), cp = Math.cos(cam.pol);
+  camera.position.set(cam.tx + cam.r * sp_ * Math.sin(cam.az), cam.ty + cam.r * cp, cam.tz + cam.r * sp_ * Math.cos(cam.az));
+  camera.lookAt(cam.tx, cam.ty, cam.tz);
+}
+var ptrs = {}, lastPinch = 0, el = renderer.domElement;
+el.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+el.addEventListener('pointerdown', function (e) { el.setPointerCapture(e.pointerId); ptrs[e.pointerId] = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey }; lastPinch = 0; });
+el.addEventListener('pointerup', function (e) { delete ptrs[e.pointerId]; lastPinch = 0; });
+el.addEventListener('pointercancel', function (e) { delete ptrs[e.pointerId]; lastPinch = 0; });
+el.addEventListener('pointermove', function (e) {
+  var p = ptrs[e.pointerId]; if (!p) return;
+  var ids = Object.keys(ptrs), dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
+  if (ids.length >= 2) {
+    var a = ptrs[ids[0]], b = ptrs[ids[1]], dist = Math.hypot(a.x - b.x, a.y - b.y);
+    if (lastPinch) cam.r = Math.min(240, Math.max(18, cam.r * lastPinch / dist)); lastPinch = dist;
+  } else if (p.pan) {
+    var k = cam.r * 0.0016; cam.tx -= (dx * Math.cos(cam.az) + dy * Math.sin(cam.az)) * k; cam.tz -= (-dx * Math.sin(cam.az) + dy * Math.cos(cam.az)) * k;
+  } else { cam.az -= dx * 0.005; cam.pol = Math.min(1.45, Math.max(0.15, cam.pol - dy * 0.005)); }
+  updateCam();
+});
+el.addEventListener('wheel', function (e) { e.preventDefault(); cam.r = Math.min(240, Math.max(18, cam.r * Math.exp(e.deltaY * 0.0012))); updateCam(); }, { passive: false });
+function resize() {
+  var w = window.innerWidth, h = window.innerHeight; renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix();
+  var v = new THREE.Vector2(); renderer.getDrawingBufferSize(v); coreMat.uniforms.uRes.value.copy(v); outMat.uniforms.uRes.value.copy(v); updateCam();
+}
+window.addEventListener('resize', resize);
+
+/* ------------------------------------------------------------------ controls */
+var sliders = document.getElementById('sliders'), syncers = [];
+function addSlider(key, label, min, max, step, fmt, onChange) {
+  var wrap = document.createElement('div'), id = 'sl_' + key; wrap.className = 'ctl';
+  wrap.innerHTML = '<label for="' + id + '">' + label + '</label><output id="' + id + '_o"></output><input type="range" id="' + id + '" min="' + min + '" max="' + max + '" step="' + step + '">';
+  sliders.appendChild(wrap);
+  var inp = wrap.querySelector('input'), out = wrap.querySelector('output');
+  function sync() { inp.value = P[key]; out.textContent = fmt(P[key]); } syncers.push(sync); sync();
+  inp.addEventListener('input', function () { P[key] = parseFloat(inp.value); out.textContent = fmt(P[key]); onChange(); });
+}
+function px1(v) { return v.toFixed(1) + ' px'; }
+addSlider('N', 'Particles', 500, 12000, 500, function (v) { return v.toLocaleString('en-GB'); }, function () { buildParticles(); });
+addSlider('L', 'Trail length (recorded points)', 3, 48, 1, function (v) { return v + ' = ' + (v * recDt).toFixed(2) + ' s'; }, function () { buildParticles(); });
+addSlider('speed', 'Wind speed scale', 0.3, 2.5, 0.1, function (v) { return v.toFixed(1) + '×'; }, function () {});
+addSlider('effect', 'Terrain effect on wind', 0, 1, 0.05, function (v) { return Math.round(v * 100) + '%'; }, function () { rebuildWind(); });
+addSlider('wHead', 'Head width', 1, 5, 0.1, px1, applyLook);
+addSlider('hover', 'Height above ground', 0, 1.5, 0.05, function (v) { return v.toFixed(2) + ' units'; }, function () {});
+addSlider('bright', 'Terrain brightness', 0.5, 1, 0.05, function (v) { return Math.round(v * 100) + '%'; }, applyBrightness);
+function syncAll() { syncers.forEach(function (f) { f(); }); document.getElementById('outline').checked = P.outline; document.getElementById('speedcol').checked = P.speedCol; document.getElementById('depth').checked = P.depth; }
+function setPreset(name) {
+  if (name === 'windy') { P.N = 3000; P.L = 20; P.wHead = 3.2; P.wTail = 0.5; P.alphaPow = 1.8; P.opacity = 0.95; P.outline = true; }
+  else { P.N = 2500; P.L = 4; P.wHead = 2.6; P.wTail = 2.6; P.alphaPow = 0.15; P.opacity = 0.9; P.outline = false; }
+  document.getElementById('pWindy').setAttribute('aria-pressed', String(name === 'windy')); document.getElementById('pOld').setAttribute('aria-pressed', String(name !== 'windy'));
+  syncAll(); applyLook(); buildParticles();
+}
+document.getElementById('pWindy').addEventListener('click', function () { setPreset('windy'); });
+document.getElementById('pOld').addEventListener('click', function () { setPreset('old'); });
+document.getElementById('pause').addEventListener('click', function (e) { P.paused = !P.paused; e.currentTarget.setAttribute('aria-pressed', String(P.paused)); e.currentTarget.textContent = P.paused ? 'Play' : 'Pause'; });
+document.getElementById('reset').addEventListener('click', function () { for (var k in cam0) cam[k] = cam0[k]; updateCam(); });
+document.getElementById('outline').addEventListener('change', function (e) { P.outline = e.target.checked; applyLook(); });
+document.getElementById('speedcol').addEventListener('change', function (e) { P.speedCol = e.target.checked; applyLook(); });
+document.getElementById('depth').addEventListener('change', function (e) { P.depth = e.target.checked; applyLook(); });
+document.getElementById('collapse').addEventListener('click', function (e) {
+  var b = document.getElementById('body'), open = b.hidden; b.hidden = !open; e.currentTarget.setAttribute('aria-expanded', String(open)); e.currentTarget.textContent = open ? '–' : '+'; e.currentTarget.setAttribute('aria-label', open ? 'Collapse controls' : 'Expand controls');
+});
+
+/* ------------------------------------------------------------------ run */
+var v3 = new THREE.Vector3(), lastStats = '', frames = 0, fps = 0, tPrev = performance.now(), tFps = tPrev, nF = 0;
+function trailPixels() {
+  var w = window.innerWidth, h = window.innerHeight, sum = 0, n = 0, tail = (rh + 1) % L, i, tries = 0;
+  while (n < 150 && tries < 600) {
+    tries++; i = Math.floor(Math.random() * N); if (age[i] < 1.5 || lifeMax[i] - age[i] < 1) continue;
+    var q = (i * L + tail) * 3; v3.set(ring[q], ring[q + 1], ring[q + 2]).project(camera); var x0 = v3.x * w / 2, y0 = v3.y * h / 2;
+    v3.set(px[i], heightAt(px[i], pz[i]) + P.hover, pz[i]).project(camera); sum += Math.hypot(v3.x * w / 2 - x0, v3.y * h / 2 - y0); n++;
+  }
+  return n ? sum / n : 0;
+}
+function frame(now) {
+  requestAnimationFrame(frame);
+  var dt = Math.min((now - tPrev) / 1000, 0.05); tPrev = now;
+  if (!P.paused) advance(dt);
+  fill(); renderer.render(scene, camera);
+  nF++; if (now - tFps > 700) { fps = nF * 1000 / (now - tFps); nF = 0; tFps = now; }
+  if (++frames % 20 === 0) {
+    var px_ = Math.round(trailPixels()), s = px_ + ' px typical trail length at this zoom (Windy ≈ 40–100 px, current portal ≈ 10–20 px) · ' + fps.toFixed(0) + ' fps';
+    if (s !== lastStats) { statsEl.textContent = s; lastStats = s; }
+  }
+}
+rebuildWind(); applyLook(); resize(); buildParticles();
+window.__wind = { P: P,  stats: function () { return { trailPx: trailPixels(), N: N, L: L, fps: fps }; } };
+requestAnimationFrame(function (t) { tPrev = t; tFps = t; frame(t); });
+})();
+</script>
+</body>
+</html>
